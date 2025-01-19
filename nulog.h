@@ -10,8 +10,10 @@ extern "C" {
 #include <unistd.h>
 #include <time.h>
 #include <string.h>
+#include <stdlib.h>
 
-#define NULOG_VERSION "1.0.0"
+#define NULOG_VERSION "1.1.0"
+#define NULOG_MAX_STREAMS 8
 
 #define NULOG_RED     "\x1b[31m"
 #define NULOG_GREEN   "\x1b[32m"
@@ -30,19 +32,24 @@ typedef enum {
 } NuLogLevel;
 
 typedef struct {
+    FILE* stream;
+    int colored_output;
+} NuLogStream;
+
+typedef struct {
     NuLogLevel min_level;
     int show_timestamp;
     int show_source;
-    int colored_output;
-    FILE* output_stream;
+    NuLogStream streams[NULOG_MAX_STREAMS];
+    size_t stream_count;
 } NuLogConfig;
 
 static NuLogConfig nulog_config = {
     .min_level = NULOG_LEVEL_DEBUG,
     .show_timestamp = 1,
     .show_source = 1,
-    .colored_output = 1,
-    .output_stream = NULL
+    .streams = {{NULL, 0}},
+    .stream_count = 0
 };
 
 static const char* nulog_level_strings[] = {
@@ -65,57 +72,107 @@ static void nulog_write(NuLogLevel level, const char* source, const char* format
     if (level < nulog_config.min_level) return;
 
     char timestamp[32] = {0};
-
     if (nulog_config.show_timestamp) {
         time_t now = time(NULL);
         struct tm* tm_info = localtime(&now);
         strftime(timestamp, sizeof(timestamp), "%H:%M:%S", tm_info);
     }
 
-    FILE* stream = nulog_config.output_stream ? nulog_config.output_stream : stdout;
+    char message[4096] = {0};
+    va_list args_copy;
+    va_copy(args_copy, args);
+    vsnprintf(message, sizeof(message), format, args_copy);
+    va_end(args_copy);
 
-    if (nulog_config.show_timestamp) {
-        fprintf(stream, "%s ", timestamp);
-    }
+    for (size_t i = 0; i < nulog_config.stream_count; i++) {
+        FILE* stream = nulog_config.streams[i].stream;
+        int colored = nulog_config.streams[i].colored_output;
 
-    if (nulog_config.colored_output) {
-        fprintf(stream, "%s%-5s%s ",
+        if (nulog_config.show_timestamp) {
+            fprintf(stream, "%s ", timestamp);
+        }
+
+        if (colored) {
+            fprintf(stream, "%s%-5s%s ",
                 nulog_level_colors[level],
                 nulog_level_strings[level],
                 NULOG_RESET);
-    } else {
-        fprintf(stream, "%-5s ", nulog_level_strings[level]);
-    }
+        } else {
+            fprintf(stream, "%-5s ", nulog_level_strings[level]);
+        }
 
-    if (nulog_config.show_source) {
-        fprintf(stream, "%s: ", source);
-    }
+        if (nulog_config.show_source) {
+            fprintf(stream, "%s: ", source);
+        }
 
-    vfprintf(stream, format, args);
-    fprintf(stream, "\n");
-    fflush(stream);
+        fprintf(stream, "%s\n", message);
+        fflush(stream);
+    }
 }
 
 static inline void nulog_init() {
-    nulog_config.output_stream = stdout;
+    nulog_config.streams[0].stream = stdout;
+    nulog_config.streams[0].colored_output = isatty(fileno(stdout));
+    nulog_config.stream_count = 1;
+}
+
+static inline int nulog_add_stream(FILE* stream, int colored_output) {
+    char timestamp[32] = {0};
+    time_t now = time(NULL);
+    struct tm* tm_info = localtime(&now);
+    strftime(timestamp, sizeof(timestamp), "%H:%M:%S", tm_info);
+
+    if (nulog_config.stream_count >= NULOG_MAX_STREAMS) {
+        fprintf(stderr, "[%s] ERROR : Maximum number of streams reached (%d)\n", timestamp, NULOG_MAX_STREAMS);
+        return 0;
+    }
+
+    if (!stream) {
+        fprintf(stderr, "[%s] ERROR : Cannot add NULL stream\n", timestamp);
+        return 0;
+    }
+
+    for (size_t i = 0; i < nulog_config.stream_count; i++) {
+        if (nulog_config.streams[i].stream == stream) {
+            return 1;
+        }
+    }
+
+    if (colored_output && !isatty(fileno(stream))) {
+        colored_output = 0;
+        fprintf(stderr, "[%s] WARNING : Colored output disabled for non-terminal stream.\n", timestamp);
+    }
+
+    nulog_config.streams[nulog_config.stream_count].stream = stream;
+    nulog_config.streams[nulog_config.stream_count].colored_output = colored_output;
+    nulog_config.stream_count++;
+    return 1;
+}
+
+static inline void nulog_remove_stream(const FILE* stream) {
+    for (size_t i = 0; i < nulog_config.stream_count; i++) {
+        if (nulog_config.streams[i].stream == stream) {
+            for (size_t j = i; j < nulog_config.stream_count - 1; j++) {
+                nulog_config.streams[j] = nulog_config.streams[j + 1];
+            }
+            nulog_config.stream_count--;
+            break;
+        }
+    }
 }
 
 static inline void nulog_configure(NuLogConfig config) {
-    nulog_config = config;
-    if (nulog_config.output_stream == NULL) {
-        nulog_config.output_stream = stdout;
+    nulog_config.min_level = config.min_level;
+    nulog_config.show_timestamp = config.show_timestamp;
+    nulog_config.show_source = config.show_source;
+    nulog_config.stream_count = 0;
+
+    for (size_t i = 0; i < config.stream_count && i < NULOG_MAX_STREAMS; i++) {
+        nulog_add_stream(config.streams[i].stream, config.streams[i].colored_output);
     }
 
-    if (!isatty(fileno(nulog_config.output_stream))) {
-        char timestamp[32] = {0};
-        time_t now = time(NULL);
-        struct tm* tm_info = localtime(&now);
-        strftime(timestamp, sizeof(timestamp), "%H:%M:%S", tm_info);
-
-        if (nulog_config.colored_output) {
-            nulog_config.colored_output = 0;
-            fprintf(stderr, "[%s] WARNING : Colored output disabled for non-terminal stream. Set 'colored_output' to 0 to disable this message.\n", timestamp);
-        }
+    if (nulog_config.stream_count == 0) {
+        nulog_init();
     }
 }
 
