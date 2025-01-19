@@ -38,18 +38,37 @@ int main() {
 you can configure nulog's behaviour
 
 ```c
-FILE* log_file = fopen("/path/to/log.txt", "w");
-NuLogConfig config = {
-    .min_level = NULOG_LEVEL_INFO,     // min. log level to display
-    .show_timestamp = 1,               // should timestamps be shown in output
-    .show_source = 1,                  // should source file and line be shown in output
-    .colored_output = 1,               // should the output have colors*
-    .output_stream = log_file          // output stream
-};
-nulog_configure(config);
+#include "nulog.h"
 
-fclose(log_file);
+int main() {
+    nulog_init(); // default settings
+
+    // custom config
+    NuLogConfig config = {
+        .min_level = NULOG_LEVEL_INFO, // min. log level to display
+        .show_timestamp = 1,           // should timestamps be shown in output
+        .show_source = 1,              // should source file and line be shown in output
+        .streams = {{stdout, 1}},      // output to stdout with colors
+        .stream_count = 1
+    };
+
+    nulog_configure(config);
+
+    // file stream
+    FILE* log_file = fopen("/path/to/log.txt", "w");
+    if (log_file) {
+        nulog_add_stream(log_file, 0);
+    }
+
+    INFO("wow this is so cool");
+    ERROR("oops");
+    
+    nulog_remove_stream(log_file);
+    fclose(log_file);
+
+    return 0;
+}
 ```
-\* this is automatically disabled if the output location is a file
+\* colored output is automatically disabled for non-terminal streams (like files)
 
 **inspired by [rxi/log.c](https://github.com/rxi/log.c/tree/master) i guess**
